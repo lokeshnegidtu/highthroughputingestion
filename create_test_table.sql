@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS load_test_runs (
+  test_run_id UUID PRIMARY KEY,
+  status TEXT NOT NULL,
+  target_documents INTEGER NOT NULL,
+  target_duration_seconds INTEGER NOT NULL,
+  requested_documents INTEGER NOT NULL DEFAULT 0,
+  accepted_202 INTEGER NOT NULL DEFAULT 0,
+  rejected_429 INTEGER NOT NULL DEFAULT 0,
+  rejected_4xx INTEGER NOT NULL DEFAULT 0,
+  failed_5xx INTEGER NOT NULL DEFAULT 0,
+  failed_timeout INTEGER NOT NULL DEFAULT 0,
+  p50_latency_ms FLOAT NOT NULL DEFAULT 0,
+  p95_latency_ms FLOAT NOT NULL DEFAULT 0,
+  p99_latency_ms FLOAT NOT NULL DEFAULT 0,
+  test_result TEXT,
+  actual_duration_seconds FLOAT,
+  throughput_docs_per_sec FLOAT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ
+);

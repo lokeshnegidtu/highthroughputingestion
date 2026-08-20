@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AegisIngest - Ingestion & Processing Control Plane</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-mark">🛡️</div>
+        <div class="brand-copy">
+          <span>AegisIngest</span>
+          <small>Pipeline Control Plane</small>
+        </div>
+      </div>
+
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <a href="#dashboard" class="active">📊 Dashboard</a>
+        <a href="#ingestion">📤 Ingestion</a>
+        <a href="#documents">📄 Documents</a>
+        <a href="#pipeline">🔄 Pipeline</a>
+        <a href="#workers">👷 Workers</a>
+        <a href="#loadtesting">🧪 Load Testing</a>
+        <a href="#performance">📈 Performance</a>
+        <a href="#health">⚙ System Health</a>
+      </nav>
+
+      <div class="sidebar-status">
+        <p class="sidebar-label">DURABLE STORES</p>
+        <div id="side-db" class="status-line muted">● PostgreSQL Checking</div>
+        <div id="side-storage" class="status-line muted">● MinIO Checking</div>
+        <div id="side-prometheus" class="status-line muted">● Metrics DB Checking</div>
+      </div>
+    </aside>
+
+    <!-- Main Content Shell -->
+    <main class="main-shell">
+      <header class="page-header">
+        <div>
+          <em id="page-context">PIPELINE CONTROL PLANE</em>
+          <h1 id="page-title">Dashboard</h1>
+          <p id="description">Monitor intake, execution, and processing health in real time.</p>
+        </div>
+
+        <div class="header-actions">
+          <!-- Global Backpressure Indicator -->
+          <div id="global-backpressure" class="bp-indicator accepting">
+            <span class="bp-dot"></span>
+            <span class="bp-text">SYSTEM ACCEPTING</span>
+          </div>
+          <span class="live-pill"><span class="dot"></span> Live</span>
+          <span id="updated">Loading…</span>
+          <button id="refresh" class="ghost-button" type="button">↻ Refresh</button>
+        </div>
+      </header>
+
+      <!-- 1. DASHBOARD SCREEN -->
+      <section id="dashboard" class="screen active">
+        <div class="section-heading">
+          <div>
+            <h2>Operations Overview</h2>
+            <p>Live admission and queueing stats.</p>
+          </div>
+          <div id="overall-status" class="status-badge success">● HEALTHY</div>
+        </div>
+
+        <!-- KPI Cards -->
+        <div class="metric-grid">
+          <article class="metric-card cyan-glow">
+            <span class="metric-label">Submitted</span>
+            <strong id="submitted">—</strong>
+            <small id="submission-rate">No data</small>
+          </article>
+          <article class="metric-card yellow-glow">
+            <span class="metric-label">Queued</span>
+            <strong id="queued">—</strong>
+            <small>Kafka Buffer</small>
+          </article>
+          <article class="metric-card violet-glow">
+            <span class="metric-label">Processing</span>
+            <strong id="processing">—</strong>
+            <small id="processing-rate">No data</small>
+          </article>
+          <article class="metric-card emerald-glow">
+            <span class="metric-label">Completed</span>
+            <strong id="completed">—</strong>
+            <small id="completed-rate">No data</small>
+          </article>
+          <article class="metric-card rose-glow">
+            <span class="metric-label">Failed</span>
+            <strong id="failed">—</strong>
+            <small id="failure-rate">No data</small>
+          </article>
+          <article class="metric-card amber-glow">
+            <span class="metric-label">Rejected</span>
+            <strong id="rejected">—</strong>
+            <small>Load Shed (429)</small>
+          </article>
+        </div>
+
+        <!-- Pipeline Flow Overview -->
+        <article class="panel flow-panel">
+          <div class="panel-header">
+            <h3>Pipeline Flow Overview</h3>
+          </div>
+          <div class="flow-diagram">
+            <div class="flow-node">
+              <span class="node-lbl">INGESTION</span>
+              <strong id="flow-ingest-rate">0.00 docs/s</strong>
+            </div>
+            <div class="flow-vector">──→</div>
+            <div class="flow-node highlight">
+              <span class="node-lbl">KAFKA BROKER</span>
+              <strong id="flow-kafka-lag">Lag: 0</strong>
+              <small>16 Partitions</small>
+            </div>
+            <div class="flow-vector">──→</div>
+            <div class="flow-node">
+              <span class="node-lbl">WORKERS</span>
+              <strong id="flow-worker-rate">0.00 docs/s</strong>
+              <small id="flow-worker-count">0 Active</small>
+            </div>
+            <div class="flow-vector">──→</div>
+            <div class="flow-node success-node">
+              <span class="node-lbl">COMPLETED</span>
+              <strong id="flow-completed-total">0</strong>
+            </div>
+          </div>
+        </article>
+
+        <!-- Telemetry Summary -->
+        <div class="panel-header" style="margin-top: 26px;">
+          <h3>Telemetry Summary</h3>
+        </div>
+        <div class="metric-grid telemetry-summary-grid">
+          <article class="telemetry-card">
+            <span class="metric-label">API p95 Latency</span>
+            <strong id="telemetry-p95">—</strong>
+            <small>Target: &lt;150 ms</small>
+          </article>
+          <article class="telemetry-card">
+            <span class="metric-label">Current Throughput</span>
+            <strong id="telemetry-throughput">—</strong>
+            <small>Accepted rate</small>
+          </article>
+          <article class="telemetry-card">
+            <span class="metric-label">Kafka Consumer Lag</span>
+            <strong id="telemetry-lag">—</strong>
+            <small>Pending drain</small>
+          </article>
+          <article class="telemetry-card">
+            <span class="metric-label">Active Workers</span>
+            <strong id="telemetry-workers">—</strong>
+            <small>Scaling pool</small>
+          </article>
+          <article class="telemetry-card">
+            <span class="metric-label">429 Responses</span>
+            <strong id="telemetry-429">—</strong>
+            <small>Shed traffic</small>
+          </article>
+          <article class="telemetry-card">
+            <span class="metric-label">5xx Responses</span>
+            <strong id="telemetry-5xx">—</strong>
+            <small>Target: 0%</small>
+          </article>
+        </div>
+      </section>
+
+      <!-- 2. INGESTION SCREEN -->
+      <section id="ingestion" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>Document Ingestion</h2>
+            <p>Directly submit cybersecurity audit reports to the asynchronous pipeline.</p>
+          </div>
+        </div>
+
+        <div class="content-grid two-column ingestion-grid">
+          <article class="panel form-panel">
+            <div class="panel-header">
+              <h3>Upload Audit Documents</h3>
+            </div>
+            
+            <form id="upload-form" class="upload-form">
+              <!-- Drag and drop zone -->
+              <div id="drop-zone" class="drop-zone">
+                <div class="drop-zone-content">
+                  <span class="drop-icon">📤</span>
+                  <p>Drag &amp; Drop Documents here</p>
+                  <small>or click to browse files (PDF, JSON, TXT)</small>
+                </div>
+                <input name="file" type="file" id="file-input" required style="display: none;" />
+              </div>
+              
+              <div id="selected-file-display" class="selected-file-display" style="display: none;">
+                Selected File: <strong id="selected-file-name">None</strong>
+                <button type="button" id="clear-selected-file" class="clear-btn">✕</button>
+              </div>
+
+              <label>
+                Agency
+                <select name="agency_id" required>
+                  <option value="">-- Select Agency --</option>
+                  <option value="agency-01">Agency A</option>
+                  <option value="agency-02">Agency B</option>
+                  <option value="agency-03">Agency C</option>
+                  <option value="agency-04">Agency D</option>
+                  <option value="agency-05">Agency E</option>
+                </select>
+              </label>
+
+              <label>
+                Case ID / Auditor Organisation
+                <input name="case_id" type="text" placeholder="e.g. CASE-2026-09" required />
+              </label>
+
+              <button type="submit" class="primary-button submit-btn">Submit Document</button>
+            </form>
+          </article>
+
+          <article class="panel info-panel">
+            <div class="panel-header">
+              <h3>Admission &amp; Backpressure Control</h3>
+            </div>
+            <p>The Ingestion API monitors system performance in real-time. If the downstream pipeline is overloaded or the RTT exceeds 100ms, backpressure is enforced to protect internal databases and message brokers.</p>
+            <div class="note-block">
+              <strong>Multi-Tenancy Guard</strong>
+              <p>Each agency is allocated a fair share token bucket. High-frequency submissions from a single entity are throttled with HTTP 429 without impacting other agencies.</p>
+            </div>
+          </article>
+        </div>
+
+        <article id="upload-result" class="result-state neutral">
+          Provide parameters and select a file to submit.
+        </article>
+      </section>
+
+      <!-- 3. DOCUMENTS SCREEN -->
+      <section id="documents" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>Audit Documents Registry</h2>
+            <p>Durable metadata store registry containing all audit reports ingested.</p>
+          </div>
+        </div>
+
+        <!-- Filter Row -->
+        <div class="filter-row panel">
+          <label>
+            Search ID / Hash
+            <input id="filter-search" type="text" placeholder="Search by Document ID..." />
+          </label>
+
+          <label>
+            Agency
+            <select id="filter-agency">
+              <option value="">All Agencies</option>
+              <option value="agency-01">Agency A</option>
+              <option value="agency-02">Agency B</option>
+              <option value="agency-03">Agency C</option>
+              <option value="agency-04">Agency D</option>
+              <option value="agency-05">Agency E</option>
+            </select>
+          </label>
+
+          <label>
+            Case / Auditor Org
+            <input id="filter-case" type="text" placeholder="Filter by Case ID..." />
+          </label>
+
+          <label>
+            Status
+            <select id="filter-status">
+              <option value="">All Statuses</option>
+              <option value="QUEUED">🔵 Queued</option>
+              <option value="PROCESSING">🟡 Processing</option>
+              <option value="COMPLETED">🟢 Completed</option>
+              <option value="FAILED">🔴 Failed</option>
+              <option value="REJECTED">⚪ Rejected</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- Table Panel -->
+        <article class="panel table-panel">
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Document ID</th>
+                  <th>Agency</th>
+                  <th>Case ID</th>
+                  <th>Status</th>
+                  <th>Partition</th>
+                  <th>Submitted At</th>
+                  <th>Worker</th>
+                </tr>
+              </thead>
+              <tbody id="documents-rows">
+                <tr><td colspan="7">Loading Registry…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- Document Details Modal / Panel -->
+        <div id="details-modal" class="modal">
+          <div class="modal-content">
+            <span class="close-modal" id="close-modal-btn">&times;</span>
+            <h3 id="modal-doc-title">DOC-001</h3>
+            <hr class="modal-divider"/>
+            <div class="modal-grid">
+              <div>
+                <p><strong>Agency:</strong> <span id="modal-agency">—</span></p>
+                <p><strong>Case ID:</strong> <span id="modal-case">—</span></p>
+                <p><strong>Event ID:</strong> <span id="modal-event-id">—</span></p>
+                <p><strong>Sequence ID:</strong> <span id="modal-seq">—</span></p>
+              </div>
+              <div>
+                <p><strong>Kafka Partition:</strong> <span id="modal-partition">—</span></p>
+                <p><strong>Kafka Offset:</strong> <span id="modal-offset">—</span></p>
+                <p><strong>Assigned Worker:</strong> <span id="modal-worker">—</span></p>
+                <p><strong>SHA-256 Hash:</strong> <span id="modal-hash" class="code-font">—</span></p>
+              </div>
+            </div>
+            
+            <div class="timeline-container">
+              <h4>Processing Lifecycle Timeline</h4>
+              <div class="timeline" id="modal-timeline">
+                <!-- Dynamically populated events -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. PIPELINE TOPOLOGY SCREEN -->
+      <section id="pipeline" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>Pipeline Architecture Monitor</h2>
+            <p>Visual map of the processing stages, message broker partitioning, and node rates.</p>
+          </div>
+        </div>
+
+        <div class="topology-wrapper panel">
+          <div class="topology-container">
+            <!-- Source Node -->
+            <div class="topo-node-block source-node">
+              <div class="node-header">📤 INGRESS</div>
+              <div class="node-body">
+                <div class="node-main-val" id="topo-ingress-rate">0.0/s</div>
+                <div class="node-sub-lbl">Client Uploads</div>
+              </div>
+            </div>
+
+            <div class="topo-vector">──→</div>
+
+            <!-- Ingestion API Node -->
+            <div class="topo-node-block api-node">
+              <div class="node-header">⚡ FastAPI Ingestion</div>
+              <div class="node-body">
+                <div class="node-main-val" id="topo-api-active">0 in-flight</div>
+                <div class="node-sub-lbl" id="topo-api-limit">Limit: 250</div>
+              </div>
+            </div>
+
+            <div class="topo-vector">──→</div>
+
+            <!-- Kafka Node -->
+            <div class="topo-node-block kafka-node">
+              <div class="node-header">📦 Redpanda / Kafka</div>
+              <div class="node-body">
+                <div class="node-main-val" id="topo-kafka-lag-val">Lag: 0</div>
+                <div class="node-sub-lbl">16 Partitions</div>
+              </div>
+            </div>
+
+            <div class="topo-vector">──→</div>
+
+            <!-- Worker Pool Container Node -->
+            <div class="topo-node-block workers-node">
+              <div class="node-header">👷 Worker Pool</div>
+              <div class="node-body">
+                <div class="node-main-val" id="topo-worker-throughput">0.0 docs/s</div>
+                <div class="node-sub-lbl" id="topo-worker-active-count">0 workers scaling</div>
+                <div class="mini-worker-pills" id="topo-worker-pills">
+                  <!-- Pills for active workers -->
+                </div>
+              </div>
+            </div>
+
+            <div class="topo-vector">──→</div>
+
+            <!-- Outflow completed -->
+            <div class="topo-node-block completed-node">
+              <div class="node-header">✅ Completed</div>
+              <div class="node-body">
+                <div class="node-main-val" id="topo-completed-rate-val">0.0/s</div>
+                <div class="node-sub-lbl" id="topo-completed-count-val">0 Total</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. WORKERS SCREEN -->
+      <section id="workers" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>Processing Workers</h2>
+            <p>Current state and horizontal scale coordinates of downstream consumers.</p>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span class="metric-label">Total Workers</span>
+            <strong id="worker-total">—</strong>
+            <small>Deregister idle workers after 10m</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Healthy Workers</span>
+            <strong id="worker-healthy">—</strong>
+            <small>Active heartbeats</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Unhealthy Workers</span>
+            <strong id="worker-unhealthy">—</strong>
+            <small>Missing &gt;30s</small>
+          </article>
+        </div>
+
+        <article class="panel table-panel">
+          <div class="panel-header">
+            <h3>Active Worker Inventory</h3>
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Worker ID</th>
+                  <th>Status</th>
+                  <th>CPU Usage</th>
+                  <th>Memory Usage</th>
+                  <th>Throughput</th>
+                  <th>Current Document</th>
+                  <th>Failed Jobs</th>
+                  <th>Retries</th>
+                </tr>
+              </thead>
+              <tbody id="worker-table-body">
+                <tr><td colspan="8">No worker telemetry received.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <!-- 6. LOAD TESTING SCREEN -->
+      <section id="loadtesting" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>Load Generator Console</h2>
+            <p>Perform direct stress profiling against the ingestion layer to prove the backpressure guarantee.</p>
+          </div>
+        </div>
+
+        <div class="content-grid two-column">
+          <!-- Configuration Card -->
+          <article class="panel">
+            <div class="panel-header">
+              <h3>Load test configuration</h3>
+            </div>
+            
+            <div class="test-grid">
+              <label>
+                Scenario Preset
+                <select id="test-preset">
+                  <option value="5000/30">5,000 documents / 30 seconds (166.7 req/s)</option>
+                  <option value="1000/15">1,000 documents / 15 seconds (66.7 req/s)</option>
+                  <option value="500/10">500 documents / 10 seconds (50.0 req/s)</option>
+                  <option value="custom">Custom Configuration</option>
+                </select>
+              </label>
+
+              <label>
+                Documents Count
+                <input id="test-docs-count" type="number" value="5000" min="10" max="10000" />
+              </label>
+
+              <label>
+                Duration (seconds)
+                <input id="test-duration-sec" type="number" value="30" min="5" max="300" />
+              </label>
+
+              <label>
+                Target Concurrency
+                <input id="test-concurrency" type="number" value="2500" min="1" max="5000" />
+              </label>
+
+              <label>
+                Calculated Ingress Rate
+                <input id="test-calculated-rate" type="text" value="166.67 docs/sec" readonly class="code-font" />
+              </label>
+            </div>
+
+            <div class="action-row">
+              <button id="start-test" class="primary-button action-btn" type="button">Start Test</button>
+              <button id="stop-test" class="ghost-button action-btn" type="button" disabled>Stop Test</button>
+            </div>
+
+            <div class="progress-block">
+              <div class="progress-header">
+                <span>Test Execution Progress</span>
+                <strong id="test-progress-pct">0%</strong>
+              </div>
+              <div class="progress-bar"><span id="test-progress-bar-fill"></span></div>
+            </div>
+          </article>
+
+          <!-- Live Telemetry Status Panel -->
+          <article class="panel">
+            <div class="panel-header">
+              <h3>Execution Statistics</h3>
+            </div>
+            <div class="test-stats-grid">
+              <div class="test-stat-card">
+                <span>Requests</span>
+                <strong id="test-stat-requests">0 / 0</strong>
+              </div>
+              <div class="test-stat-card">
+                <span>Throughput</span>
+                <strong id="test-stat-throughput">0.0 req/s</strong>
+              </div>
+              <div class="test-stat-card">
+                <span>p95 Latency</span>
+                <strong id="test-stat-p95">0 ms</strong>
+              </div>
+              <div class="test-stat-card">
+                <span>p99 Latency</span>
+                <strong id="test-stat-p99">0 ms</strong>
+              </div>
+            </div>
+
+            <div class="response-codes-wrap">
+              <h4>HTTP Response Codes</h4>
+              <div class="response-bar-graph">
+                <div class="code-box status-2xx">
+                  <span>HTTP 2xx (Accepted)</span>
+                  <strong id="test-code-2xx">0</strong>
+                </div>
+                <div class="code-box status-4xx">
+                  <span>HTTP 4xx (Shed / Error)</span>
+                  <strong id="test-code-4xx">0</strong>
+                </div>
+                <div class="code-box status-5xx">
+                  <span>HTTP 5xx (Failed)</span>
+                  <strong id="test-code-5xx" class="success-stat">0</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <!-- Graphs Grid -->
+        <div class="panel-header" style="margin-top: 26px;">
+          <h3>Real-time Metrics Charts</h3>
+        </div>
+        <div class="content-grid two-column graphs-grid">
+          <!-- Throughput Chart -->
+          <article class="panel chart-panel">
+            <h4>Requests / Sec Throughput</h4>
+            <div class="chart-wrap">
+              <svg id="svg-throughput" viewBox="0 0 720 200" preserveAspectRatio="none">
+                <path id="path-throughput" class="line submitted-line" d=""></path>
+              </svg>
+            </div>
+          </article>
+          <!-- Latency Chart -->
+          <article class="panel chart-panel">
+            <h4>API p95 / p99 Latency (ms)</h4>
+            <div class="chart-wrap">
+              <svg id="svg-latency" viewBox="0 0 720 200" preserveAspectRatio="none">
+                <path id="path-p95" class="line processing-line" d=""></path>
+                <path id="path-p99" class="line lag-line" d=""></path>
+              </svg>
+            </div>
+          </article>
+        </div>
+
+        <article id="load-result-box" class="result-state neutral">
+          Click Start Test to trigger stress benchmark.
+        </article>
+      </section>
+
+      <!-- 7. PERFORMANCE TARGETS SCREEN -->
+      <section id="performance" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>SLA Performance Targets</h2>
+            <p>Verification scorecard validating actual pipeline capacity vs targets.</p>
+          </div>
+        </div>
+
+        <article class="panel table-panel">
+          <div class="table-wrapper">
+            <table class="performance-table">
+              <thead>
+                <tr>
+                  <th>SLA Pipeline Target</th>
+                  <th>Required Target Spec</th>
+                  <th>Measured Actual Spec</th>
+                  <th>Validation Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Burst Absorption</strong></td>
+                  <td>5,000 uploads absorbed within 30s window</td>
+                  <td id="perf-burst-val">—</td>
+                  <td><span id="perf-burst-status" class="status-badge neutral">No Run</span></td>
+                </tr>
+                <tr>
+                  <td><strong>HTTP 5xx Error Rate</strong></td>
+                  <td>Exactly 0% HTTP 5xx responses (load-shed correctly)</td>
+                  <td id="perf-5xx-val">—</td>
+                  <td><span id="perf-5xx-status" class="status-badge neutral">No Run</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Ingestion API Latency</strong></td>
+                  <td>p95 Ingestion Latency &lt; 150 ms</td>
+                  <td id="perf-p95-val">—</td>
+                  <td><span id="perf-p95-status" class="status-badge neutral">No Run</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Concurrent Streams</strong></td>
+                  <td>2,500 active concurrent pipeline channels</td>
+                  <td id="perf-concurrent-val">—</td>
+                  <td><span id="perf-concurrent-status" class="status-badge neutral">No Run</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <!-- 8. SYSTEM HEALTH SCREEN -->
+      <section id="health" class="screen">
+        <div class="section-heading">
+          <div>
+            <h2>Pipeline Node Health</h2>
+            <p>Operational health check across ingestion API, broker cluster, and databases.</p>
+          </div>
+        </div>
+
+        <!-- Service Health Statuses -->
+        <div class="health-grid">
+          <article class="health-card panel">
+            <div class="health-header">
+              <h3>Ingestion API</h3>
+              <div id="health-status-api" class="status-badge neutral">Checking</div>
+            </div>
+            <p>FastAPI ASGI endpoints on Port 8010</p>
+          </article>
+
+          <article class="health-card panel">
+            <div class="health-header">
+              <h3>Kafka Broker</h3>
+              <div id="health-status-broker" class="status-badge neutral">Checking</div>
+            </div>
+            <p>Redpanda Cluster Engine on Port 9092</p>
+          </article>
+
+          <article class="health-card panel">
+            <div class="health-header">
+              <h3>PostgreSQL</h3>
+              <div id="health-status-postgres" class="status-badge neutral">Checking</div>
+            </div>
+            <p>Durable Metadata Store on Port 5432</p>
+          </article>
+
+          <article class="health-card panel">
+            <div class="health-header">
+              <h3>MinIO Store</h3>
+              <div id="health-status-minio" class="status-badge neutral">Checking</div>
+            </div>
+            <p>Content-Addressable Object Storage on Port 9000</p>
+          </article>
+
+          <article class="health-card panel">
+            <div class="health-header">
+              <h3>Workers Pool</h3>
+              <div id="health-status-workers" class="status-badge neutral">Checking</div>
+            </div>
+            <p>Consumer thread registry channels</p>
+          </article>
+
+          <article class="health-card panel">
+            <div class="health-header">
+              <h3>Metrics Engine</h3>
+              <div id="health-status-metrics" class="status-badge neutral">Checking</div>
+            </div>
+            <p>Prometheus Collector server on Port 9095</p>
+          </article>
+        </div>
+
+        <!-- System Hardware Gauges -->
+        <div class="panel-header" style="margin-top: 26px;">
+          <h3>Control Node Resource Telemetry</h3>
+        </div>
+        <div class="metric-grid resource-gauges">
+          <article class="resource-card panel">
+            <h4>CPU Utilisation</h4>
+            <div class="gauge-ring-container">
+              <div class="progress-bar"><span id="gauge-cpu-fill" style="width: 25%;"></span></div>
+            </div>
+            <small id="gauge-cpu-val">25% Utilised</small>
+          </article>
+          
+          <article class="resource-card panel">
+            <h4>Memory Usage</h4>
+            <div class="gauge-ring-container">
+              <div class="progress-bar"><span id="gauge-memory-fill" style="width: 45%;"></span></div>
+            </div>
+            <small id="gauge-memory-val">45% (1.8GB / 4.0GB)</small>
+          </article>
+
+          <article class="resource-card panel">
+            <h4>Disk Storage Space</h4>
+            <div class="gauge-ring-container">
+              <div class="progress-bar"><span id="gauge-disk-fill" style="width: 12%;"></span></div>
+            </div>
+            <small id="gauge-disk-val">12% (12GB / 100GB)</small>
+          </article>
+
+          <article class="resource-card panel">
+            <h4>Network I/O Rate</h4>
+            <div class="gauge-ring-container">
+              <div class="progress-bar"><span id="gauge-network-fill" style="width: 8%;"></span></div>
+            </div>
+            <small id="gauge-network-val">8.2 MB/s In / Out</small>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

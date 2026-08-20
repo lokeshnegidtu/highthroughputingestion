@@ -1,0 +1,236 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Ingestion Status: Accepted (202)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(http_requests_total{status_code=\"202\"}) or vector(0)",
+          "legendFormat": "Accepted"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "title": "5xx Server Errors (Target: 0%)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(http_requests_total{status_code=~\"5..\"}) or vector(0)",
+          "legendFormat": "5xx Errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "title": "Graceful 429 Shedding",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(http_requests_total{status_code=\"429\"}) or vector(0)",
+          "legendFormat": "429 Shed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "yellow" },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 4,
+      "title": "API p95 Latency (SLA: <150ms)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000 or vector(0)",
+          "legendFormat": "p95 Latency"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red", "value": 150 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 5,
+      "title": "Active Concurrent Pipelines",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "active_pipelines_gauge or vector(0)",
+          "legendFormat": "Active Pipelines"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 6,
+      "title": "Ingestion Throughput by Status Code (req/s)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[10s])) by (status_code)",
+          "legendFormat": "Status {{status_code}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth"
+          },
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 7,
+      "title": "API Ingestion Latency Percentiles (p50, p90, p95, p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[30s])) by (le)) * 1000",
+          "legendFormat": "p50 (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(http_request_duration_seconds_bucket[30s])) by (le)) * 1000",
+          "legendFormat": "p90 (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[30s])) by (le)) * 1000",
+          "legendFormat": "p95 (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[30s])) by (le)) * 1000",
+          "legendFormat": "p99 (ms)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth" },
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 150 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 8,
+      "title": "Worker Processing Throughput & Completion Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(worker_documents_processed_total[10s])) by (status)",
+          "legendFormat": "Worker {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "docs/s"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 9,
+      "title": "Worker Processing Latency Distribution",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(worker_processing_duration_seconds_bucket[30s])) by (le)) * 1000",
+          "legendFormat": "Worker p95 (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(worker_processing_duration_seconds_bucket[30s])) by (le)) * 1000",
+          "legendFormat": "Worker p50 (ms)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    }
+  ],
+  "refresh": "2s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["aegis", "ingestion", "cybersecurity"],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["1s", "2s", "5s", "10s"]
+  },
+  "timezone": "browser",
+  "title": "AegisIngest - Document Ingestion & Observability",
+  "uid": "aegis-ingest-main",
+  "version": 1
+}

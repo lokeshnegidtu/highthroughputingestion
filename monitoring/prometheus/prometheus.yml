@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: 'aegis-ingest-api'
+    static_configs:
+      - targets: ['api:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'aegis-processor-worker'
+    static_configs:
+      - targets: ['worker:9100']
+    metrics_path: '/metrics'
+
+  - job_name: 'broker-redpanda'
+    static_configs:
+      - targets: ['broker:9644']
+    metrics_path: '/public_metrics'
