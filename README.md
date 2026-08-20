@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # AegisIngest: High-Throughput Cybersecurity Audit Report Ingestion & Processing Pipeline
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
@@ -126,3 +127,7 @@ docker compose up --scale worker=4 -d
 * 📘 [Design Document](docs/DESIGN_DOCUMENT.md) — Comprehensive architecture, capacity math, and contracts.
 * 📊 [Results and Analysis](docs/RESULTS_AND_ANALYSIS.md) — Benchmark charts, latency percentiles, and bottleneck tuning.
 * 🛠️ [Operational Runbook](docs/RUNBOOK.md) — Production deployment, scaling, monitoring, and recovery procedures.
+=======
+# highthroughputingestion
+ high-throughput asynchronous document ingestion pipeline with Kafka-based queuing, worker processing, backpressure monitoring, and an operations dashboard
+>>>>>>> 045d28839cd0e9207efe60cba85026a7db87eb0c
