@@ -1,133 +1,174 @@
-<<<<<<< HEAD
-# AegisIngest: High-Throughput Cybersecurity Audit Report Ingestion & Processing Pipeline
+# AegisIngest
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
-[![0% 5xx Guarantee](https://img.shields.io/badge/5xx%20Errors-0.00%25%20by%20construction-blue.svg)]()
-[![SLA Compliance](https://img.shields.io/badge/p95%20Latency-21.4ms%20(%3C150ms%20target)-success.svg)]()
-[![Air-Gapped Ready](https://img.shields.io/badge/deployment-100%25%20offline%20ready-orange.svg)]()
+A containerized, asynchronous document ingestion pipeline for cybersecurity audit reports. The API applies adaptive concurrency and per-agency rate limits, stores accepted documents in PostgreSQL and MinIO, publishes work to Redpanda, and processes it through a horizontally scalable worker pool. A FastAPI operations dashboard and Prometheus/Grafana provide live telemetry.
 
-> **Project Context**: *Development of AI-Based Solution for Analysing, Benchmarking and Quality Monitoring of Cybersecurity Audit Reports and Performance Monitoring of Auditing Organisations.*
+## Architecture
 
----
+```text
+Clients
+  |
+  v
+Ingestion API (FastAPI :8010)
+  |-- PostgreSQL  -- durable document metadata, idempotency, events, results
+  |-- MinIO       -- content-addressed document blobs
+  '-- Redpanda    -- audit-reports-ingest, 16 partitions
+                         |
+                         v
+                 Worker consumer group
+                 aegis-audit-processors
 
-## 1. System Overview
-
-**AegisIngest** is a containerized, decoupled, event-driven ingestion and processing pipeline built to absorb massive bursts of cybersecurity compliance reports (e.g. ISO 27001, SOC 2, NIST CSF, FedRAMP High, PCI-DSS v4) when submission deadlines trigger sudden floods of uploads from auditing organizations.
-
-The system enforces backpressure via adaptive latency-based admission control, ensuring **0% HTTP 5xx errors by construction**, buffers submissions across **16 derived Kafka/Redpanda partitions** with strict per-agency FIFO ordering, and processes reports asynchronously through auto-scalable worker pools. PostgreSQL is the durable metadata/idempotency store and MinIO stores document blobs; Redis is not part of the pipeline.
-
-```
-[Auditing Agencies] 
-       │ (5,000 Burst in 30s)
-       ▼
-┌─────────────────────────────────────────────────────────┐
-│              AegisIngest Ingestion API                  │
-│  - Adaptive AIMD Concurrency Limiter (RTT < 100ms)      │
-│  - Per-Agency Token Bucket (Fair Multi-Tenancy)         │
-│  - SHA-256 Content-Addressable Storage (CAS)            │
-│  - PostgreSQL Durable Idempotency + Metadata             │
-│  - Deterministic Murmur3 Sharding: Hash(agency_id) % 16 │
-└──────────────┬───────────────────────────┬──────────────┘
-               │                           │
-               ▼                           ▼
-┌──────────────────────────────┐ ┌────────────────────────┐
-│  Redpanda / Kafka Broker     │ │ PostgreSQL + MinIO     │
-│  - 16 Derived Partitions     │ │  - 256MB LRU Budget    │
-│  - Topic: audit-reports-ingest│ │  - Idempotency TTL 24h │
-│  - Topic: audit-reports-dlq  │ │  - Job State TTL 48h   │
-└──────────────┬───────────────┘ └───────────▲────────────┘
-               │                             │
-               ▼                             │
-┌──────────────────────────────┐             │
-│ Processing Worker Pool (1..N)├─────────────┘
-│  - Batch Consumer Group      │
-│  - Document Text Parser      │
-│  - Cyber Benchmark Analyzer  │
-│  - Compliance Grade (0-100)  │
-└──────────────────────────────┘
+Operations Dashboard (FastAPI :8090) --> API, PostgreSQL, Prometheus
+Prometheus (:9095) --> API and worker metrics
+Grafana (:3010) --> Prometheus dashboards
 ```
 
----
+### Ingestion behavior
 
-## 2. Performance Targets & Verified Results
+- New submissions return `202 Accepted` and are processed asynchronously.
+- Duplicate idempotency keys or document hashes return `200` with the existing job.
+- Saturated concurrency or per-agency rate limits return `429` with `Retry-After`.
+- Documents larger than 25 MiB return `413`.
+- Accepted bytes are stored using SHA-256 content-addressed storage.
+- Agency IDs are deterministically assigned to one of 16 Kafka-compatible partitions, preserving agency sequence ordering.
+- The worker uses the `aegis-audit-processors` consumer group, batches up to 50 records, and supports up to 8 concurrent processing tasks per worker.
 
-| Target Requirement | Performance SLA | Verified Result | Status |
-|---|---|---|---|
-| **Concurrent Active Pipelines** | 2,500 active pipelines | **2,500 active pipelines** | **PASS** |
-| **Burst Ingestion Absorption** | 5,000 documents in 30.0s | **5,000 documents in 28.42s** ($175.9\text{ req/s}$) | **PASS** |
-| **HTTP 5xx Server Errors** | **0.00% by construction** | **0.00% (0 errors across all failure paths)** | **PASS** |
-| **Ingestion API p95 Latency** | $< 150.0\text{ ms}$ | **$21.45\text{ ms}$** | **PASS** |
-| **Ingestion API p99 Latency** | $< 250.0\text{ ms}$ | **$38.80\text{ ms}$** | **PASS** |
-| **Downstream Drain Window** | Drain 5,000 backlog in $< 60\text{ s}$ | **$34.10\text{ s}$ with 4 scaled workers** | **PASS** |
+## Requirements
 
----
+- Docker Engine with Docker Compose v2
+- Python 3.10+ for the health check, load generator, and tests
+- At least 4 GB RAM recommended for the complete stack
 
-## 3. Mathematical Capacity Derivations (No Magic Numbers)
+## Quickstart
 
-In accordance with mandatory design disciplines, all system constants are derived from queueing theory and Little's Law:
+Start the complete stack from the repository root:
 
-1. **Mean Arrival Rate**: $\lambda = \frac{5000}{30} = 166.67\text{ req/s}$; Peak burst $\lambda_{peak} = 2.0 \times 166.67 = 333.33\text{ req/s}$.
-2. **In-Flight Concurrency (Little's Law)**: $L = \lambda_{peak} \times W_{api} = 333.33 \times 0.150\text{s} = 50.0$ concurrent requests. Maximum ceiling set to $5 \times L_{peak} = 250$.
-3. **Broker Partitions**: Worker core capacity $\mu_{core} = \frac{1}{0.20\text{s}} = 5.0\text{ docs/s}$. Required drain rate $\mu_{drain} = \frac{5000}{60\text{s}} = 83.33\text{ docs/s}$. Parallel consumer streams $K = \lceil \frac{83.33}{5.0} \rceil = 17$. Partitions configured to **$P = 16$** (scalable to 24).
-4. **Admission capacity**: the limiter rejects with `429` before producer buffers are exhausted; PostgreSQL and MinIO retain accepted metadata and document bytes durably.
-
-*Detailed derivations and proofs in [docs/DESIGN_DOCUMENT.md](docs/DESIGN_DOCUMENT.md).*
-
----
-
-## 4. Quickstart: Zero-to-Hero Deployment
-
-### Automated Deployment
 ```bash
-# Linux / macOS
+# Linux/macOS
 ./start.sh
 
-# Windows (PowerShell)
+# Windows PowerShell
 .\start.ps1
 
-# Or Standard Docker Compose
+# Any platform with Docker Compose
 docker compose up -d --build
 ```
 
-### Access URLs
-* **Ingestion API Docs**: [http://localhost:8010/docs](http://localhost:8010/docs)
-* **Real-Time Operations Console**: [http://localhost:8090](http://localhost:8090)
-* **Grafana Dashboards**: [http://localhost:3010](http://localhost:3010) (pre-provisioned, anonymous access enabled)
-* **Prometheus TSDB**: [http://localhost:9095](http://localhost:9095)
+The startup scripts wait for the services and run `scripts/health_check.py`. The health check verifies the API, API metrics, dashboard, Prometheus, and Grafana endpoints.
 
----
+Stop the stack while retaining named volumes:
 
-## 5. Verification & Testing
+```bash
+docker compose down
+```
 
-### 5.1 Automated Unit & Integration Tests
+Remove containers, volumes, and local storage data:
+
+```bash
+docker compose down -v
+```
+
+## Service URLs
+
+| Service | URL | Purpose |
+| --- | --- | --- |
+| Ingestion API docs | [http://localhost:8010/docs](http://localhost:8010/docs) | Interactive OpenAPI documentation |
+| API health | [http://localhost:8010/healthz](http://localhost:8010/healthz) | Dependency health status |
+| API metrics | [http://localhost:8010/metrics](http://localhost:8010/metrics) | Prometheus scrape endpoint |
+| Operations dashboard | [http://localhost:8090](http://localhost:8090) | Telemetry, uploads, and load testing |
+| Prometheus | [http://localhost:9095](http://localhost:9095) | Metrics and queries |
+| Grafana | [http://localhost:3010](http://localhost:3010) | Provisioned monitoring dashboards |
+
+Grafana is configured for anonymous administrator access in the local Compose deployment.
+
+## API Endpoints
+
+The API accepts JSON, multipart form data, or a raw request body at `POST /api/v1/ingest`.
+
+Example JSON submission:
+
+```bash
+curl -X POST http://localhost:8010/api/v1/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agency_id": "agency-001",
+    "audit_type": "ISO_27001",
+    "report_year": 2026,
+    "auditor_org": "Example Audit Group",
+    "idempotency_key": "example-report-001",
+    "content_raw": "audit report content"
+  }'
+```
+
+The response contains a `job_id`, checksum, partition, and relative `status_url`. Retrieve processing state with:
+
+```bash
+curl http://localhost:8010/api/v1/status/<job_id>
+```
+
+Additional API endpoints:
+
+- `GET /livez` - alias for the health endpoint.
+- `GET /api/v1/stats` - limiter state and capacity configuration.
+- `GET /api/v1/console` - read-only document, worker, event, and admission snapshot.
+
+Default capacity settings are a 5,000-document burst target over 30 seconds, a maximum of 250 concurrent requests, a 100-token per-agency burst, and a 20-token-per-second per-agency refill rate. These settings can be overridden through the API service environment; the maximum request payload is 25 MiB.
+
+## Dashboard Features
+
+The dashboard at `http://localhost:8090` provides:
+
+- Live pipeline health, document lifecycle counts, throughput, latency, Kafka lag, and backpressure telemetry.
+- Document upload through `POST /api/documents`.
+- Per-document processing events through `GET /api/documents/{document_id}/events`.
+- Generated sample PDF reports through `POST /api/generate-sample-reports`.
+- Configurable performance tests through `POST /api/performance-tests` and `GET /api/performance-tests/{test_run_id}`.
+- A direct burst trigger through `POST /api/trigger-burst`.
+
+## Testing and Load Generation
+
+Run the automated suite from the repository root:
+
 ```bash
 pytest tests/ -v --tb=short
 ```
-Verifies:
-* `test_zero_5xx_under_severe_load`: Floods API with saturated traffic $\to$ 100% responses are 202 or 429 with `Retry-After`, **0% 5xx errors**.
-* `test_idempotent_duplicate_submission`: Duplicate SHA-256 hashes return original job without duplicate execution.
-* `test_per_agency_partition_consistency`: Enforces per-agency FIFO routing invariant.
-* `test_aimd_adaptive_limiter`: Verifies dynamic backoff and additive recovery math.
 
-### 5.2 Burst Load Test (5,000 in 30 Seconds)
+The tests cover deterministic partitioning, adaptive limiter behavior, token buckets, content-addressed storage, analyzer scoring, backpressure classification, idempotency, dashboard telemetry, and load-test result classification.
+
+Run the standalone burst generator against a running API:
+
 ```bash
-python scripts/load_test.py --url http://localhost:8010 --total-requests 5000 --duration 30 --concurrency 2500
+python scripts/load_test.py \
+  --url http://localhost:8010 \
+  --total-requests 5000 \
+  --duration 30 \
+  --concurrency 2500
 ```
 
-### 5.3 Zero-Downtime Worker Scaling
+The `Makefile` provides shortcuts:
+
 ```bash
-# Scale worker pool dynamically
+make up
+make health
+make test
+make load-test
+make scale-workers
+make down
+```
+
+Scale the worker service horizontally:
+
+```bash
 docker compose up --scale worker=4 -d
 ```
 
----
+## Configuration and Data
 
-## 6. Deliverables Index
+Compose provisions Redpanda, PostgreSQL 16, MinIO, Prometheus, and Grafana. Persistent service data uses named Docker volumes. API document staging and blob data are also mounted at `data/storage` in the repository.
 
-* 📘 [Design Document](docs/DESIGN_DOCUMENT.md) — Comprehensive architecture, capacity math, and contracts.
-* 📊 [Results and Analysis](docs/RESULTS_AND_ANALYSIS.md) — Benchmark charts, latency percentiles, and bottleneck tuning.
-* 🛠️ [Operational Runbook](docs/RUNBOOK.md) — Production deployment, scaling, monitoring, and recovery procedures.
-=======
-# highthroughputingestion
- high-throughput asynchronous document ingestion pipeline with Kafka-based queuing, worker processing, backpressure monitoring, and an operations dashboard
->>>>>>> 045d28839cd0e9207efe60cba85026a7db87eb0c
+Important defaults are defined in [api/src/config.py](api/src/config.py) and [worker/src/config.py](worker/src/config.py). The PostgreSQL schema, including documents, processing results, processing events, worker status, and load-test runs, is initialized from [database/init.sql](database/init.sql).
+
+## Project Documentation
+
+- [Design document](docs/DESIGN_DOCUMENT.md) - architecture, capacity assumptions, and contracts.
+- [Results and analysis](docs/RESULTS_AND_ANALYSIS.md) - benchmark methodology and results.
+- [Operational runbook](docs/RUNBOOK.md) - deployment, scaling, monitoring, and recovery procedures.
