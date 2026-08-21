@@ -1,156 +1,166 @@
-# System Design Document: AegisIngest Pipeline
-**High-Throughput Cybersecurity Audit Report Ingestion & Benchmarking Pipeline**
+# AegisIngest System Design
 
----
+## 1. Purpose and Scope
 
-## 1. Executive Summary & Purpose
+AegisIngest is a containerized, asynchronous ingestion pipeline for cybersecurity audit reports. The current implementation separates request admission, durable metadata, object storage, broker delivery, worker processing, and operational telemetry.
 
-The **AegisIngest** pipeline is designed for the *AI-Based Solution for Analysing, Benchmarking and Quality Monitoring of Cybersecurity Audit Reports and Performance Monitoring of Auditing Organisations*.
+The design target is a burst of 5,000 submissions over 30 seconds. This is a capacity target used to configure the system and load-test tools; it is not a measured production result. The repository contains unit and integration-style tests for the admission, idempotency, partitioning, storage, analyzer, and dashboard classification behavior.
 
-Audit reports arrive from auditing bodies (e.g., CERT-In auditors, PwC, EY, Deloitte, KPMG, internal agency audit teams) not in a steady trickle, but in severe deadline bursts (e.g., end-of-quarter or fiscal-year compliance deadlines). The ingestion layer must absorb sudden submission spikes without server crashes and without overwhelming downstream processing stages (PDF parsing, text extraction, control matrix evaluation, benchmark index scoring).
-
-### Core Architectural Guarantees
-1. **Decoupled Asynchronous Processing**: Ingestion is completely decoupled from intensive AI parsing via an enterprise-grade message broker (Redpanda/Kafka) with 16 derived partitions.
-2. **Backpressure & 0% 5xx Guarantee**: Multi-tiered admission control (Adaptive AIMD Latency Limiter + Token Bucket Rate Limiting) sheds saturated traffic gracefully via `HTTP 429 Too Many Requests` with a dynamic `Retry-After` header. Unhandled exceptions are intercepted at the ASGI layer, guaranteeing **0% HTTP 5xx errors by construction**.
-3. **Deterministic Sharding Contract**: Strict per-agency hashing guarantees FIFO document ordering per agency without cross-agency blocking.
-4. **Air-Gapped Portability**: 100% offline-compatible container stack with zero external cloud dependencies.
-
----
-
-## 2. Capacity Derivations & Mathematical Models
-
-In compliance with the **No Hand-Tuned Magic Numbers** discipline, every capacity constant in AegisIngest is derived from stated system targets using formal queueing theory and Little's Law.
-
-### 2.1 Stated Capacity Specifications
-* **Burst Volume ($N$)**: $5,000$ document submissions.
-* **Burst Time Window ($T$)**: $30.0$ seconds.
-* **Target Ingestion API Latency ($W_{api}$)**: $p95 \le 150 \text{ ms}$ ($0.150\text{ s}$).
-* **Target Active Pipelines ($C_{pipeline}$)**: $2,500$ concurrent active pipelines.
-* **Drain Target Window ($T_{drain}$)**: $60.0$ seconds to fully drain the 5,000 document backlog.
-
----
-
-### 2.2 Ingestion API Throughput & Concurrency Derivation (Little's Law)
-
-1. **Mean Arrival Rate ($\lambda_{mean}$)**:
-   $$\lambda_{mean} = \frac{N}{T} = \frac{5,000 \text{ documents}}{30.0 \text{ seconds}} = 166.67 \text{ req/sec}$$
-
-2. **Peak Burst Arrival Rate ($\lambda_{peak}$)**:
-   Assuming a peak-to-average burst factor $k_{burst} = 2.0$ for Poisson arrivals:
-   $$\lambda_{peak} = k_{burst} \times \lambda_{mean} = 2.0 \times 166.67 = 333.33 \text{ req/sec}$$
-
-3. **In-Flight Concurrency Ceiling ($L_{api}$)**:
-   By Little's Law ($L = \lambda \cdot W$), at target p95 latency $W = 0.150 \text{ s}$:
-   $$L_{mean} = \lambda_{mean} \times W = 166.67 \times 0.150 = 25.0 \text{ in-flight requests}$$
-   $$L_{peak} = \lambda_{peak} \times W = 333.33 \times 0.150 = 50.0 \text{ in-flight requests}$$
-
-4. **Maximum API Concurrency Limit ($C_{max}$)**:
-   To provide a $5\times$ safety margin for asynchronous network I/O jitter before shedding load:
-   $$C_{max} = 5 \times L_{peak} = 5 \times 50.0 = 250 \text{ concurrent connections}$$
-   *Classification: Derived from Little's Law.*
-
----
-
-### 2.3 Broker Partition & Worker Drain Sizing
-
-1. **Single Worker Core Processing Time ($t_{proc}$)**:
-   Extracting text, computing compliance matrix, and calculating benchmark score takes $t_{proc} \approx 200 \text{ ms} = 0.20 \text{ s}$ per core.
-   $$\mu_{core} = \frac{1}{t_{proc}} = \frac{1}{0.20} = 5.0 \text{ docs/sec/core}$$
-
-2. **Required Drain Rate ($\mu_{drain}$)**:
-   To completely drain the 5,000-document burst within $T_{drain} = 60.0 \text{ s}$:
-   $$\mu_{drain} = \frac{5,000}{60.0} = 83.33 \text{ docs/sec}$$
-
-3. **Required Worker Consumer Parallelism ($K$)**:
-   $$K = \left\lceil \frac{\mu_{drain}}{\mu_{core}} \right\rceil = \left\lceil \frac{83.33}{5.0} \right\rceil = 17 \text{ parallel consumer streams}$$
-
-4. **Broker Partition Sizing ($P$)**:
-   Since a Kafka/Redpanda consumer group can assign at most one consumer per partition, the partition count $P$ must satisfy $P \ge K$.
-   Setting **$P = 16$ partitions** (with support for scaling to 24) allows 16 to 24 parallel worker threads across scaled worker containers.
-   *Classification: Derived from Drain Rate SLA.*
-
----
-
-### 2.4 Durable Data Stores (PostgreSQL and MinIO)
-
-PostgreSQL stores document metadata, statuses, monotonically assigned per-agency sequence numbers, and final results. MinIO holds document bytes as `documents/<sha256>.bin`. Kafka is the only burst buffer; neither datastore is used as a queue.
-
----
-
-## 3. High-Level Architecture Diagram
+## 2. Runtime Architecture
 
 ```mermaid
 graph TD
-    subgraph Public Ingress Zone [Public Network Zone: aegis-frontend-net]
-        Client[Auditing Agencies / Automated Submitters] -->|POST /api/v1/ingest| API[FastAPI Ingestion API<br/>port: 8000]
-        Client -->|View Dashboards| Console[Real-Time Operations UI<br/>port: 8080]
-        Client -->|View Metrics| Grafana[Grafana Console<br/>port: 3000]
-    end
-
-    subgraph Private Backend Zone [Private Network Zone: aegis-backend-net]
-        API -->|1. Acquire Slot| Limiter[Adaptive AIMD Limiter<br/>Target RTT: 100ms]
-        API -->|2. Check Burst Rate| RateLimiter[Per-Agency Token Bucket]
-        API -->|3. Save Blob & Compute SHA256| Storage[(MinIO Object Storage)]
-        API -->|4. Metadata + idempotency| Postgres[(PostgreSQL)]
-        API -->|5. Shard by agency_id % 16| Broker[Redpanda Broker<br/>16 Partitions<br/>Topic: audit-reports-ingest]
-        
-        Broker -->|Batch Poll 50 msgs| Workers[Processing Worker Pool<br/>Scale 1..N Containers]
-        Workers -->|Fetch Blob| Storage
-        Workers -->|Extract & Score| Engine[Cybersecurity Benchmark Analyzer]
-        Workers -->|Persist one result| Postgres
-        Workers -->|Poison Pills| DLQ[Topic: audit-reports-dlq]
-        
-        Prometheus[Prometheus 2.52<br/>port: 9090] -->|Scrape /metrics| API
-        Prometheus -->|Scrape /metrics| Workers
-        Prometheus -->|Scrape /public_metrics| Broker
-        Grafana -->|Query TSDB| Prometheus
-        Console -->|Query Telemetry| API
-    end
+    Client[Submitters] --> API[FastAPI ingestion API\ncontainer port 8000 / host port 8010]
+    API --> Limiter[Adaptive concurrency limiter]
+    API --> AgencyLimit[Per-agency token bucket]
+    API --> DB[(PostgreSQL 16)]
+    API --> Blob[(MinIO object storage)]
+    API --> Broker[Redpanda\nKafka-compatible broker]
+    Broker --> Worker[Worker consumer group\n8 concurrent tasks per worker]
+    Worker --> DB
+    API --> APIMetrics[API /metrics]
+    Worker --> WorkerMetrics[Worker metrics :9100]
+    APIMetrics --> Prometheus[Prometheus]
+    WorkerMetrics --> Prometheus
+    Dashboard[Operations dashboard] --> API
+    Dashboard --> DB
+    Dashboard --> Prometheus
+    Prometheus --> Grafana[Grafana]
 ```
 
----
+Compose defines two networks:
 
-## 4. Contracts & Invariants
+- `aegis-frontend-net` exposes the API, dashboard, Prometheus, and Grafana to the host.
+- `aegis-backend-net` is internal and connects the API, worker, broker, PostgreSQL, MinIO, dashboard, and Prometheus.
 
-### 4.1 Defined Sharding & Partitioning Contract
+The worker metrics port is configured as `9100` inside the worker container and is not published directly by Compose. Prometheus scrapes the configured service endpoints in `monitoring/prometheus/prometheus.yml`.
 
-| Property | Contract Specification |
-|---|---|
-| **Routing Key** | `agency_id` (UTF-8 string) |
-| **Partition Hash Function** | $\text{Partition} = \text{MurmurHash3}(\text{agency\_id}) \pmod{16}$ |
-| **Topic** | `audit-reports-ingest` |
+## 3. Admission and Ingestion Contract
 
-#### Mathematical Invariants
-* **Invariant 1 (Strict Per-Agency FIFO)**: All audit reports submitted by the same `agency_id` are guaranteed to land on the identical partition. This guarantees strict chronological sequential processing for any single agency.
-* **Invariant 2 (Independent Cross-Agency Concurrency)**: Distinct agencies are distributed uniformly across the 16 partitions, eliminating head-of-line blocking between agencies.
-* **Invariant 3 (Partition Rebalance Contract)**: Changing $P$ can remap future agency keys. Ordering is guaranteed within the partition assignment active for a sequence; strict ordering across a change requires a controlled drain/migration. PostgreSQL document-id idempotency prevents duplicate final results.
+`POST /api/v1/ingest` accepts JSON, multipart form data, or a raw body. JSON and multipart requests may provide `agency_id`, `audit_type`, `report_year`, `auditor_org`, and `idempotency_key`. Multipart requests may also provide a `file` field.
 
----
+The API processes a request in this order:
 
-### 4.2 Defined Data-Store Contract
+1. Acquire an adaptive concurrency slot.
+2. Parse the request and construct document bytes.
+3. Apply the per-agency token bucket.
+4. Reject payloads larger than 25 MiB with `413`.
+5. Save the bytes through SHA-256 content-addressed storage.
+6. Create or retrieve the durable PostgreSQL document record.
+7. Publish the event to `audit-reports-ingest` with an explicit partition.
+8. Return the job identifier and relative status URL.
 
-| Data Store | Primary Role | Eviction Policy | TTL | Idempotency Mechanics |
-|---|---|---|---|---|
-| **PostgreSQL** | Durable documents, idempotency, status, and results | Transactional | Durable | Unique idempotency key and a unique final result per document. |
-| **MinIO** | Immutable content-addressable document blob storage | None | Lifecycle-managed | Keyed by SHA-256 object key. |
+Response behavior:
 
----
+| Condition | Response |
+| --- | --- |
+| New document accepted | `202 Accepted` |
+| Existing idempotency key, or the same checksum when no key is supplied | `200 OK` with `DUPLICATE_ACCEPTED` |
+| Adaptive limiter saturated | `429` with `Retry-After` |
+| Agency bucket exhausted | `429` with `Retry-After` |
+| Payload exceeds 25 MiB | `413` |
+| Unhandled exception | Global handler returns `429` with `Retry-After: 1` |
 
-## 5. Failure Modes & Backpressure Defense Matrix
+The global exception handler is a defensive overload response. It should be treated as an operational safeguard, not as a substitute for observing and fixing unexpected exceptions.
 
-| Failure Mode / Saturation | Root Cause | System Defense & Response | HTTP Code |
-|---|---|---|---|
-| **API In-Flight Saturation** | In-flight requests exceed dynamic ceiling ($L > C_{max}$) | Adaptive AIMD Limiter rejects request immediately with dynamic `Retry-After`. | `429 Too Many Requests` |
-| **Single Agency Spam / Flood** | One agency exceeds fair-share token limit ($>100$ burst) | Per-Agency Token Bucket isolates the noisy agency without affecting other tenants. | `429 Too Many Requests` |
-| **Broker Unavailability** | Transient network partition between API and Redpanda | Ingestion API captures connection error safely and emits 429 backpressure retry. | `429 Too Many Requests` |
-| **Duplicate Submission** | Network retry re-sending identical payload | PostgreSQL unique idempotency key returns the original job record without re-queueing. | `200 OK` / `202 Accepted` |
-| **Malformed / Poison Document** | Invalid JSON or corrupted binary uploaded | Worker intercepts parsing error and routes message to Dead-Letter Queue (`audit-reports-dlq`). | Logged to DLQ |
-| **Uncaught Runtime Exception** | Unexpected edge-case code failure | Global ASGI Exception Trap catches exception, logs traceback, and returns safe 429 response. | `429 Too Many Requests` |
+## 4. Capacity Configuration
 
----
+The default API settings in `api/src/config.py` are:
 
-## 6. Offline & Air-Gapped Compliance
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `BURST_VOLUME` | 5,000 | Target burst size used by the configuration and tooling |
+| `BURST_WINDOW_SECONDS` | 30 | Target burst window |
+| `TARGET_P95_LATENCY_SECONDS` | 0.150 | Target API p95 latency |
+| `MAX_CONCURRENT_REQUESTS` | 250 | Initial hard concurrency ceiling |
+| `ADAPTIVE_MIN_LIMIT` | 25 | Adaptive limiter lower bound |
+| `ADAPTIVE_MAX_LIMIT` | 500 | Adaptive limiter upper bound |
+| `ADAPTIVE_RTT_TARGET_MS` | 100 | RTT threshold used by the adaptive limiter |
+| `RATE_LIMIT_AGENCY_BURST` | 100 | Initial tokens per agency |
+| `RATE_LIMIT_AGENCY_RATE` | 20/s | Agency token refill rate |
+| `KAFKA_NUM_PARTITIONS` | 16 | Ingest topic partition count |
+| `MAX_PAYLOAD_BYTES` | 25 MiB | Maximum request document size |
 
-* **Zero Cloud Dependency**: Entire stack runs containerized with local PostgreSQL, MinIO, and Redpanda.
-* **Zero External Fonts/CDNs in Dashboard**: Dashboard uses bundled vanilla CSS and canvas charting.
-* **Multi-Stage Slim Docker Images**: Built from `python:3.11-slim` with rootless execution for enterprise security compliance.
+The target-rate derivation is:
+
+$$
+\lambda_{mean} = \frac{5000}{30} = 166.67\ \text{requests/second}
+$$
+
+The API configuration also records a peak coefficient of 2.0. Applying it to the target mean rate gives 333.33 requests/second. At the 150 ms target latency, Little's Law gives 50 target in-flight requests at that peak rate. The configured initial ceiling of 250 is a 5x safety factor over that calculation. These are planning assumptions, not measured guarantees.
+
+## 5. Partitioning and Ordering
+
+The producer uses `agency_id` as the Kafka key and explicitly selects the partition:
+
+$$
+\text{partition} = |\operatorname{MurmurHash3}(\text{agency\_id})| \bmod 16
+$$
+
+If the optional `mmh3` dependency is unavailable, the implementation falls back to deterministic CRC32. The tests verify that the same agency maps consistently and that a set of agencies covers the configured partition range.
+
+The same agency is routed consistently to one partition, which supports ordered consumption for that agency under the active partition mapping. This is not a global FIFO guarantee: different agencies can share a partition, and changing the partition count can remap keys.
+
+The main topic is `audit-reports-ingest`. `audit-reports-dlq` is configured in API and worker settings, but the current consumer code does not document a separate DLQ publishing path as part of the normal processing flow; failures are retried and ultimately marked failed in PostgreSQL.
+
+## 6. Persistence and Idempotency
+
+PostgreSQL is the durable source of truth when infrastructure is available. The schema contains:
+
+- `documents`: idempotency key, agency sequence, object key, checksum, broker metadata, lifecycle status, and retry data.
+- `processing_results`: one final result per document, protected by a unique document foreign key.
+- `processing_events`: chronological API and worker lifecycle events.
+- `worker_status`: worker registration, heartbeat, resource fields, and processing counters.
+- `load_test_runs`: dashboard performance-test configuration and results.
+
+MinIO stores remote document objects in the `audit-documents` bucket. The API also uses the mounted `data/storage` directory for local content-addressed storage and temporary staging.
+
+When PostgreSQL is unavailable, the API has deliberately non-durable in-memory caches used by tests and fallback execution. Those caches do not provide persistence across process restarts and must not be treated as a production durability mode.
+
+## 7. Worker Processing
+
+Workers consume `audit-reports-ingest` using the `aegis-audit-processors` group with manual offset commit, earliest offset reset, and up to 50 records per poll. Each worker limits active processing to 8 tasks.
+
+The current `MinimalProcessingHandler`:
+
+1. Skips a document that already has a persisted result.
+2. Marks the document `PROCESSING` and records an event.
+3. Waits for the configured `PROCESSING_DELAY_SECONDS` value, 0.05 seconds by default.
+4. Persists a minimal `COMPLETED` result and updates the document.
+5. Retries failures up to the configured maximum of 3 attempts, then marks the document `FAILED`.
+
+`worker/src/analyzer.py` contains the cybersecurity benchmark analyzer and is covered by unit tests. It is not currently invoked by the minimal Kafka processing handler, so analyzer scores should not be described as part of the live worker result contract without a corresponding code change.
+
+## 8. Observability and Operations
+
+The API exposes:
+
+- `GET /healthz` and `GET /livez` for API, broker, database, and object-storage state.
+- `GET /metrics` for API Prometheus metrics.
+- `GET /api/v1/stats` for limiter state and configured capacity.
+- `GET /api/v1/console` for a read-only operational snapshot.
+- `GET /api/v1/status/{job_id}` for document status.
+
+The dashboard aggregates API, PostgreSQL, and Prometheus data through `/api/telemetry` and `/api/console`. It also supports uploads, generated sample reports, direct bursts, and asynchronous performance-test runs.
+
+Prometheus and Grafana are provisioned by Compose. Grafana uses the dashboard files under `monitoring/grafana/dashboards` and anonymous administrator access in the local deployment.
+
+## 9. Deployment Boundaries
+
+The stack has no runtime dependency on Redis or an external cloud service. It does depend on the container images used by Compose and on the dashboard's current Google Fonts references unless those images/assets are made available in an offline environment. Therefore, the architecture is locally deployable, but a strict air-gapped deployment still requires an image and frontend-asset supply process.
+
+Start the stack with `./start.sh`, `.\start.ps1`, or `docker compose up -d --build`. Scale workers with:
+
+```bash
+docker compose up --scale worker=4 -d
+```
+
+## 10. Verification References
+
+- [API configuration](../api/src/config.py)
+- [Worker configuration](../worker/src/config.py)
+- [API entry point](../api/src/main.py)
+- [Worker processor](../worker/src/processor.py)
+- [Database schema](../database/init.sql)
+- [Compose deployment](../docker-compose.yml)
+- [Test suite](../tests)
